@@ -226,8 +226,12 @@ static VOID JackMonThread(_In_ PVOID Context)
         g_Jack.WriteBuf[0] = DA7219_REPORTID_SPECKEYS;
         g_Jack.WriteBuf[1] = 0;
         KeClearEvent(evt);
+        // The handle is asynchronous, so the I/O manager requires a byte
+        // offset (else STATUS_INVALID_PARAMETER). HID class ignores it.
+        LARGE_INTEGER offset;
+        offset.QuadPart = 0;
         st = ZwWriteFile(file, evtHandle, NULL, NULL, &g_Jack.WriteIosb,
-            g_Jack.WriteBuf, DA7219_OUTPUT_REPORT_LEN, NULL, NULL);
+            g_Jack.WriteBuf, DA7219_OUTPUT_REPORT_LEN, &offset, NULL);
         if (st == STATUS_PENDING) {
             LARGE_INTEGER timeout;
             timeout.QuadPart = -10LL * 1000 * 1000;   // 1 s
@@ -245,8 +249,10 @@ static VOID JackMonThread(_In_ PVOID Context)
     for (;;) {
         KeClearEvent(evt);
         RtlZeroMemory(g_Jack.ReadBuf, sizeof(g_Jack.ReadBuf));
+        LARGE_INTEGER readOffset;
+        readOffset.QuadPart = 0;    // required on an asynchronous handle
         st = ZwReadFile(file, evtHandle, NULL, NULL, &g_Jack.ReadIosb,
-            g_Jack.ReadBuf, DA7219_INPUT_REPORT_LEN, NULL, NULL);
+            g_Jack.ReadBuf, DA7219_INPUT_REPORT_LEN, &readOffset, NULL);
         if (st == STATUS_PENDING) {
             st = JackMonWaitIo(evt, NULL);
             if (st == STATUS_CANCELLED) {
@@ -390,8 +396,7 @@ NTSTATUS JackMonStart(_In_ PDRIVER_OBJECT DriverObject)
     if (!NT_SUCCESS(st)) {
         g_Jack.Notification = NULL;
     }
-    JackLog(L"Jack monitor started (sofaudio 0.7.1), HID notification: 0x%08X, DA7219 %s",
-        st, g_Jack.Running ? L"found" : L"not found yet");
+    JackLog(L"Jack monitor started (sofaudio 0.7.2), HID notification: 0x%08X", st);
     return st;
 }
 
