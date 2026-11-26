@@ -37,6 +37,21 @@ PKSDATARANGE HeadphoneTopoPinDataRangePointersBridge[] =
 };
 
 //=============================================================================
+// SOF: jack presence change notifications on the headphone bridge pin
+static
+PCEVENT_ITEM HeadphoneJackEvents[] =
+{
+    {
+        &KSEVENTSETID_PinCapsChange,
+        KSEVENT_PINCAPS_JACKINFOCHANGE,
+        KSEVENT_TYPE_ENABLE | KSEVENT_TYPE_BASICSUPPORT,
+        EventHandler_HeadphoneJack
+    }
+};
+
+DEFINE_PCAUTOMATION_TABLE_EVENT(AutomationHeadphoneBridgePin, HeadphoneJackEvents);
+
+//=============================================================================
 static
 PCPIN_DESCRIPTOR HeadphoneTopoMiniportPins[] =
 {
@@ -65,7 +80,7 @@ PCPIN_DESCRIPTOR HeadphoneTopoMiniportPins[] =
     0,
     0,
     0,                                                  // InstanceCount
-    NULL,                                               // AutomationTable
+    &AutomationHeadphoneBridgePin,                      // AutomationTable (jack events)
     {                                                   // KsPinDescriptor
       0,                                                // InterfacesCount
       NULL,                                             // Interfaces
@@ -92,7 +107,7 @@ KSJACK_DESCRIPTION HeadphoneJackDescBridge =
     eGeoLocLeft,
     eGenLocPrimaryBox,
     ePortConnJack,
-    TRUE                                        // jack detection not wired yet: always "connected"
+    TRUE                                        // updated from jackmon when the property is read
 };
 
 // Only return a KSJACK_DESCRIPTION for the physical bridge pin.

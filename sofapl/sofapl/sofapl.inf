@@ -1,5 +1,5 @@
 ;
-; sofapl.inf - Sound Open Firmware DSP driver for Intel Apollo Lake Chromebooks
+; sofapl.inf - Sound Open Firmware DSP driver for Intel Apollo Lake and Gemini Lake Chromebooks
 ; (binds to the Audio DSP child device created by sklhdaudbus)
 ;
 
@@ -8,7 +8,7 @@ Signature   = "$WINDOWS NT$"
 Class       = System
 ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
 Provider    = %ProviderName%
-DriverVer   = 11/10/2026,0.7.0.0
+DriverVer   = 11/26/2026,0.8.1.0
 CatalogFile = sofapl.cat
 PnpLockdown = 1
 
@@ -21,12 +21,14 @@ DefaultDestDir = 12
 [SourceDisksFiles]
 sofapl.sys         = 1,,
 intel-sof-apl.ri   = 1,,
+community-sof-glk.ri = 1,,
 
 [Manufacturer]
 %StdMfg%=Standard,NTAMD64
 
 [Standard.NTAMD64]
 %SofApl.DeviceDesc%=SofApl_Device, CSAUDIO\ADSP&CTLR_VEN_8086&CTLR_DEV_5A98
+%SofApl.DeviceDesc%=SofApl_Device, CSAUDIO\ADSP&CTLR_VEN_8086&CTLR_DEV_3198
 
 [SofApl_Device.NT]
 CopyFiles=Drivers_Dir
@@ -34,6 +36,7 @@ CopyFiles=Drivers_Dir
 [Drivers_Dir]
 sofapl.sys
 intel-sof-apl.ri
+community-sof-glk.ri
 
 [SofApl_Device.NT.Services]
 AddService = sofapl,%SPSVCINST_ASSOCSERVICE%,SofApl_Service_Inst
@@ -49,6 +52,6 @@ ServiceBinary  = %12%\sofapl.sys
 SPSVCINST_ASSOCSERVICE = 0x00000002
 ProviderName           = "chromebook-audio"
 StdMfg                 = "chromebook-audio"
-DiskId1                = "SOF Apollo Lake Installation Disk"
+DiskId1                = "SOF Apollo/Gemini Lake Installation Disk"
 SofApl.DeviceDesc      = "Intel Audio DSP (Sound Open Firmware)"
-SofApl.SvcDesc         = "SOF Apollo Lake DSP Service"
+SofApl.SvcDesc         = "SOF Apollo/Gemini Lake DSP Service"

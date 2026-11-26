@@ -24,6 +24,7 @@ Abstract:
 #include "minipairs.h"
 #include <initguid.h>
 #include "sofhw.h"
+#include "jackmon.h"
 
 typedef void (*fnPcDriverUnload) (PDRIVER_OBJECT);
 fnPcDriverUnload gPCDriverUnloadRoutine = NULL;
@@ -871,6 +872,12 @@ Return Value:
     ntStatus = InstallAllCaptureFilters(DeviceObject, Irp, pAdapterCommon);
     IF_FAILED_JUMP(ntStatus, Exit);
 
+    //
+    // SOF: watch the DA7219 codec driver for headphone plug/unplug. Not fatal:
+    // without it the Headphones endpoint simply stays "connected".
+    //
+    (void)JackMonStart(DeviceObject->DriverObject);
+
 Exit:
 
     //
@@ -941,6 +948,9 @@ Return Value:
     case IRP_MN_REMOVE_DEVICE:
     case IRP_MN_SURPRISE_REMOVAL:
     case IRP_MN_STOP_DEVICE:
+        // SOF: stop jack monitoring before the filters go away.
+        JackMonStop();
+
         ext = static_cast<PortClassDeviceContext*>(_DeviceObject->DeviceExtension);
 
         if (ext->m_pCommon != NULL)

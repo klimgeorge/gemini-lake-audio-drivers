@@ -17,6 +17,7 @@ Abstract:
 #include "endpoints.h"
 #include "minwavert.h"
 #include "mintopo.h"
+#include "jackmon.h"
 
 //=============================================================================
 #pragma code_seg("PAGE")
@@ -105,7 +106,30 @@ Return Value:
     PAGED_CODE();
 
     DPF_ENTER(("[CMiniportTopology::~CMiniportTopology]"));
+
+    // SOF: stop jack events from reaching this object before it goes away.
+    if (m_DeviceType == eHeadphoneDevice)
+    {
+        JackMonClearHeadphoneTopology(this);
+    }
 } // ~CMiniportTopology
+
+//=============================================================================
+// SOF: raise "jack info changed" on the headphone bridge pin so Windows
+// re-reads KSPROPERTY_JACK_DESCRIPTION(2) and shows the Headphones endpoint as
+// plugged in / unplugged. Called by jackmon (IRQL <= APC_LEVEL).
+#pragma code_seg()
+VOID SofGenerateHeadphoneJackEvent(_In_ PVOID Topology)
+{
+    PCMiniportTopology miniport = (PCMiniportTopology)Topology;
+    miniport->GenerateEventList(
+        (GUID*)&KSEVENTSETID_PinCapsChange,
+        KSEVENT_PINCAPS_JACKINFOCHANGE,
+        TRUE,                       // pin event
+        KSPIN_TOPO_LINEOUT_DEST,    // headphone bridge pin
+        FALSE,
+        ULONG(-1));
+}
 
 //=============================================================================
 #pragma code_seg("PAGE")
@@ -255,6 +279,12 @@ Return Value:
         ntStatus,
         DPF(D_ERROR, ("Init: CMiniportTopologySimpleAudioSample::Init failed, 0x%x", ntStatus)),
         Done);
+
+    // SOF: the headphone filter receives jack plug/unplug events.
+    if (m_DeviceType == eHeadphoneDevice)
+    {
+        JackMonSetHeadphoneTopology(this);
+    }
 
 Done:
     return ntStatus;

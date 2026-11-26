@@ -1,4 +1,4 @@
-// sofapl: Sound Open Firmware DSP driver for Intel Apollo Lake Chromebooks.
+// sofapl: Sound Open Firmware DSP driver for Intel Apollo Lake and Gemini Lake Chromebooks.
 //
 // Milestone 2: bind to the Audio DSP child device created by sklhdaudbus,
 // power the DSP, download sof-apl.ri over the HDA code-loader DMA stream and
@@ -23,7 +23,13 @@
 #include "..\..\include\sofapl_iface.h"
 
 #define SOFAPL_POOL_TAG 'LPAS'
-#define FW_PATH L"\\SystemRoot\\System32\\drivers\\intel-sof-apl.ri"
+// Apollo Lake Chromebooks need the Intel production-key image; Gemini Lake
+// (and newer) Chromebooks need the community-key image, or the DSP ROM stops
+// with ROM_ERROR 0x2C (CSE signature validation failed). Same rule as Linux
+// sof-pci-dev.c chromebook_use_community_key().
+#define FW_PATH_PRODUCTION L"\\SystemRoot\\System32\\drivers\\intel-sof-apl.ri"
+#define FW_PATH_COMMUNITY  L"\\SystemRoot\\System32\\drivers\\community-sof-glk.ri"
+static PCWSTR g_FwPath = FW_PATH_PRODUCTION;
 #define FW_MAX_SIZE (4 * 1024 * 1024)
 #define LOG_CHARS 8192
 
@@ -260,7 +266,7 @@ static NTSTATUS LoadFirmwareFile(PDEVICE_CONTEXT ctx)
     if (ctx->FwFile) return STATUS_SUCCESS;
 
     UNICODE_STRING path;
-    RtlInitUnicodeString(&path, FW_PATH);
+    RtlInitUnicodeString(&path, g_FwPath);
     OBJECT_ATTRIBUTES oa;
     InitializeObjectAttributes(&oa, &path, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
 
@@ -270,7 +276,7 @@ static NTSTATUS LoadFirmwareFile(PDEVICE_CONTEXT ctx)
         FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_OPEN,
         FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE, NULL, 0);
     if (!NT_SUCCESS(st)) {
-        LogLine(ctx, L"Open firmware %s failed: 0x%08X", FW_PATH, st);
+        LogLine(ctx, L"Open firmware %s failed: 0x%08X", g_FwPath, st);
         return st;
     }
 
@@ -558,6 +564,14 @@ static NTSTATUS IpcTxLocked(PDEVICE_CONTEXT ctx, PCWSTR what, const VOID* msg, U
 //               The Linux topology has no volume on this pipeline; we add
 //               one (as the SOF pipe-volume-capture topologies do) so Windows
 //               mic level/mute work.
+// Gemini Lake (sof-glk-da7219.tplg, e.g. HP Chromebook 14a "Blooglet"):
+//   identical pipelines and SSP clocks, but the ports move:
+//   speaker   : pipeline 1 -> SSP1 (MAX98357A), 1.536 MHz BCLK, 16-bit slots
+//   headphone : pipeline 2 -> SSP2 (DA7219),    1.920 MHz BCLK, 20-bit slots
+//   SSP MCLK id 1 (APL uses 0). DMIC: the GLK topology enables PDM0 and PDM1
+//   (4 channels); we keep PDM0 stereo like APL for now.
+//   Firmware: same image as APL, but Chromebooks other than APL need the
+//   community-key signature (sof-bin community/sof-glk.ri -> sof-apl.ri).
 // All: 1 ms timer-scheduled pipeline, 768-byte buffers, s32le volume.
 // Playback: 16-bit DAI, codec consumes BCLK/FSYNC. Capture: 32-bit DMIC.
 // ---------------------------------------------------------------------------
@@ -570,6 +584,7 @@ typedef struct _EP_DESC {
     UINT32 DaiType;         // SOF_DAI_INTEL_SSP / _DMIC
     UINT32 DaiIndex;        // SSP port or DMIC FIFO
     UINT32 BclkRate;        // SSP only
+    UINT32 MclkId;          // SSP only: MCLK output used by the codec (topology token 501)
     UINT16 SlotWidth;       // SSP only
     UINT32 FrameFmt;        // DAI and host stream format (SOF_IPC_FRAME_*)
     UINT32 SampleBytes;     // container bytes per sample in the host buffer
@@ -599,22 +614,48 @@ enum { CSAudioEndpointRegister = 0, CSAudioEndpointStart = 1, CSAudioEndpointSto
 // Playback volume right after the pipeline is created: -40 dB
 #define EP_INITIAL_GAIN_PLAYBACK 655u
 
-static const EP_DESC g_Ep[SOFAPL_EP_COUNT] = {
+static const EP_DESC g_EpApl[SOFAPL_EP_COUNT] = {
     // speaker: up to -6 dB in the DSP
-    { L"speaker",   1, 1,  SOF_IPC_STREAM_PLAYBACK, SOF_DAI_INTEL_SSP, 5, 1536000, 16,
+    { L"speaker",   1, 1,  SOF_IPC_STREAM_PLAYBACK, SOF_DAI_INTEL_SSP, 5, 1536000, 0, 16,
       SOF_IPC_FRAME_S16_LE, 2, HDA_FMT_48K_16BIT_2CH,
       32768, EP_INITIAL_GAIN_PLAYBACK, SOF_VOLUME_LINEAR_ZC, 20, CSAudioEndpointTypeSpeaker },
     // headphone: the DA7219 HP amp is set to +6 dB by its driver, so cap the
     // DSP much lower for ear safety: up to -18 dB
-    { L"headphone", 2, 11, SOF_IPC_STREAM_PLAYBACK, SOF_DAI_INTEL_SSP, 1, 1920000, 20,
+    { L"headphone", 2, 11, SOF_IPC_STREAM_PLAYBACK, SOF_DAI_INTEL_SSP, 1, 1920000, 0, 20,
       SOF_IPC_FRAME_S16_LE, 2, HDA_FMT_48K_16BIT_2CH,
       8250,  EP_INITIAL_GAIN_PLAYBACK, SOF_VOLUME_LINEAR_ZC, 20, CSAudioEndpointTypeHeadphone },
     // internal mic: DMIC data is quiet, so allow up to +20 dB (10x) of digital
     // gain at 100% Windows mic level; start at 0 dB.
-    { L"mic",       4, 21, SOF_IPC_STREAM_CAPTURE,  SOF_DAI_INTEL_DMIC, 0, 0, 0,
+    { L"mic",       4, 21, SOF_IPC_STREAM_CAPTURE,  SOF_DAI_INTEL_DMIC, 0, 0, 0, 0,
       SOF_IPC_FRAME_S32_LE, 4, HDA_FMT_48K_32BIT_2CH,
       655360, SOF_VOL_0DB, SOF_VOLUME_LINEAR, 250, -1 },
 };
+
+// Gemini Lake, from sof-glk-da7219.tplg (SOF v2.2.1)
+static const EP_DESC g_EpGlk[SOFAPL_EP_COUNT] = {
+    // speaker (SSP1 on GLK): up to -6 dB in the DSP
+    { L"speaker",   1, 1,  SOF_IPC_STREAM_PLAYBACK, SOF_DAI_INTEL_SSP, 1, 1536000, 1, 16,
+      SOF_IPC_FRAME_S16_LE, 2, HDA_FMT_48K_16BIT_2CH,
+      32768, EP_INITIAL_GAIN_PLAYBACK, SOF_VOLUME_LINEAR_ZC, 20, CSAudioEndpointTypeSpeaker },
+    // headphone (SSP2 on GLK): the DA7219 HP amp is set to +6 dB by its driver, so cap the
+    // DSP much lower for ear safety: up to -18 dB
+    { L"headphone", 2, 11, SOF_IPC_STREAM_PLAYBACK, SOF_DAI_INTEL_SSP, 2, 1920000, 1, 20,
+      SOF_IPC_FRAME_S16_LE, 2, HDA_FMT_48K_16BIT_2CH,
+      8250,  EP_INITIAL_GAIN_PLAYBACK, SOF_VOLUME_LINEAR_ZC, 20, CSAudioEndpointTypeHeadphone },
+    // internal mic: DMIC data is quiet, so allow up to +20 dB (10x) of digital
+    // gain at 100% Windows mic level; start at 0 dB.
+    { L"mic",       4, 21, SOF_IPC_STREAM_CAPTURE,  SOF_DAI_INTEL_DMIC, 0, 0, 0, 0,
+      SOF_IPC_FRAME_S32_LE, 4, HDA_FMT_48K_32BIT_2CH,
+      655360, SOF_VOL_0DB, SOF_VOLUME_LINEAR, 250, -1 },
+};
+
+// Selected in PrepareHardware from the controller PCI device id.
+static const EP_DESC* g_Ep = g_EpApl;
+static PCWSTR g_PlatformName = L"Apollo Lake";
+
+#define HDA_DEV_APL 0x5A98
+#define HDA_DEV_GLK 0x3198
+
 
 static const UINT8 UUID_HOST[16] = { 0x0c,0x10,0x9d,0x8b,0x78,0x6d,0x8f,0x41,0x90,0xa3,0xe0,0xe8,0x05,0xd0,0x85,0x2b };
 static const UINT8 UUID_PGA[16]  = { 0x7e,0x67,0x7e,0xb7,0xf4,0x5f,0x88,0x41,0xaf,0x14,0xfb,0xa8,0xbd,0xbf,0x86,0x82 };
@@ -821,8 +862,8 @@ static NTSTATUS EpSetupPipeline(PDEVICE_CONTEXT ctx, ULONG e)
         return STATUS_SUCCESS;
     }
 
-    // 9b. SSP configuration: I2S, SSP provides BCLK/FSYNC, 19.2 MHz MCLK,
-    //     2 slots. clks_control = 0: no early clocks.
+    // 9b. SSP configuration: I2S, SSP provides BCLK/FSYNC, 19.2 MHz MCLK
+    //     (MCLK0 on APL, MCLK1 on GLK), 2 slots. clks_control = 0: no early clocks.
     {
         SOF_IPC_DAI_CONFIG_MSG m;
         RtlZeroMemory(&m, sizeof(m));
@@ -833,7 +874,7 @@ static NTSTATUS EpSetupPipeline(PDEVICE_CONTEXT ctx, ULONG e)
         m.format = SOF_DAI_FMT_I2S | SOF_DAI_FMT_NB_NF | SOF_DAI_FMT_CBC_CFC;
         m.group_id = 0;
         m.flags = SOF_DAI_CONFIG_FLAGS_HW_PARAMS;
-        m.ssp.mclk_id = 0;
+        m.ssp.mclk_id = d->MclkId;
         m.ssp.mclk_rate = 19200000;
         m.ssp.fsync_rate = 48000;
         m.ssp.bclk_rate = d->BclkRate;
@@ -1425,7 +1466,7 @@ NTSTATUS SofEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST, WDFCMRESLIST)
 {
     PDEVICE_CONTEXT ctx = GetDeviceContext(Device);
     ctx->Log[0] = L'\0';
-    LogLine(ctx, L"sofapl 0.7.0 starting (speaker + headphone + DMIC capture)");
+    LogLine(ctx, L"sofapl 0.8.1 starting (speaker + headphone + DMIC capture)");
 
     NTSTATUS st = WdfFdoQueryForInterface(Device, &GUID_ADSP_BUS_INTERFACE,
         (PINTERFACE)&ctx->Bus, sizeof(ADSP_BUS_INTERFACE), 1, NULL);
@@ -1455,6 +1496,27 @@ NTSTATUS SofEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST, WDFCMRESLIST)
         ctx->Bus.CtlrDevId, ctx->HdaBar.Base.Base, ctx->HdaBar.Len,
         ctx->DspBar.Base.Base, ctx->DspBar.Len, ctx->Ppcap,
         ctx->Nhlt.nhlt, ctx->Nhlt.nhltSz);
+
+    // Pick the board layout (SSP ports, MCLK) for this platform.
+    switch (ctx->Bus.CtlrDevId) {
+    case HDA_DEV_GLK:
+        g_Ep = g_EpGlk;
+        g_PlatformName = L"Gemini Lake";
+        g_FwPath = FW_PATH_COMMUNITY;
+        break;
+    case HDA_DEV_APL:
+        g_Ep = g_EpApl;
+        g_PlatformName = L"Apollo Lake";
+        g_FwPath = FW_PATH_PRODUCTION;
+        break;
+    default:
+        g_Ep = g_EpApl;
+        g_PlatformName = L"unknown (using Apollo Lake layout)";
+        break;
+    }
+    LogLine(ctx, L"Platform: %s, speaker SSP%u, headphone SSP%u, MCLK%u, firmware %s",
+        g_PlatformName, g_Ep[SOFAPL_EP_SPEAKER].DaiIndex,
+        g_Ep[SOFAPL_EP_HEADPHONE].DaiIndex, g_Ep[SOFAPL_EP_SPEAKER].MclkId, g_FwPath);
 
     // Callback object shared with CoolStar codec/amp drivers.
     if (!ctx->CsAudioCallback) {

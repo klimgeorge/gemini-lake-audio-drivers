@@ -19,6 +19,7 @@ Abstract:
 #include "speakertopo.h"
 #include "speakertoptable.h"
 #include "headphonetoptable.h"
+#include "jackmon.h"
 
 
 #pragma code_seg("PAGE")
@@ -138,6 +139,9 @@ PropertyHandler_HeadphoneTopoFilter
 
     if (IsEqualGUIDAligned(*PropertyRequest->PropertyItem->Set, KSPROPSETID_Jack))
     {
+        // Live jack state from the DA7219 codec driver (see jackmon.h).
+        HeadphoneJackDescBridge.IsConnected = JackMonIsHeadphoneConnected();
+
         if (PropertyRequest->PropertyItem->Id == KSPROPERTY_JACK_DESCRIPTION)
         {
             ntStatus = pMiniport->PropertyHandlerJackDescription(
@@ -152,7 +156,7 @@ PropertyHandler_HeadphoneTopoFilter
                 PropertyRequest,
                 ARRAYSIZE(HeadphoneJackDescriptions),
                 HeadphoneJackDescriptions,
-                0 // jack capabilities
+                JACKDESC2_PRESENCE_DETECT_CAPABILITY
                 );
         }
     }
@@ -175,5 +179,38 @@ PropertyHandler_HeadphoneTopology
 
     return pMiniport->PropertyHandlerGeneric(PropertyRequest);
 } // PropertyHandler_HeadphoneTopology
+
+//=============================================================================
+// SOF: KSEVENT_PINCAPS_JACKINFOCHANGE on the headphone bridge pin. PortCls
+// keeps the event list; jackmon fires it through GenerateEventList.
+#pragma code_seg()
+NTSTATUS
+EventHandler_HeadphoneJack
+(
+    _In_ PPCEVENT_REQUEST EventRequest
+)
+{
+    ASSERT(EventRequest);
+
+    PCMiniportTopology pMiniport = (PCMiniportTopology)EventRequest->MajorTarget;
+
+    switch (EventRequest->Verb)
+    {
+    case PCEVENT_VERB_SUPPORT:
+    case PCEVENT_VERB_REMOVE:
+        return STATUS_SUCCESS;
+
+    case PCEVENT_VERB_ADD:
+        if (EventRequest->EventEntry == NULL)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+        pMiniport->AddEventToEventList(EventRequest->EventEntry);
+        return STATUS_SUCCESS;
+
+    default:
+        return STATUS_INVALID_PARAMETER;
+    }
+} // EventHandler_HeadphoneJack
 
 #pragma code_seg()
