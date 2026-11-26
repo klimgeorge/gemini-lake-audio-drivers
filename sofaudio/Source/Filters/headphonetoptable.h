@@ -37,7 +37,10 @@ PKSDATARANGE HeadphoneTopoPinDataRangePointersBridge[] =
 };
 
 //=============================================================================
-// SOF: jack presence change notifications on the headphone bridge pin
+// SOF: jack presence change notifications for the headphone bridge pin.
+// These must be in the FILTER automation table: Windows enables the event on
+// the filter handle with KSE_PIN (pin id), because a bridge pin can't be
+// opened, so a pin-level automation table is never used.
 static
 PCEVENT_ITEM HeadphoneJackEvents[] =
 {
@@ -48,8 +51,6 @@ PCEVENT_ITEM HeadphoneJackEvents[] =
         EventHandler_HeadphoneJack
     }
 };
-
-DEFINE_PCAUTOMATION_TABLE_EVENT(AutomationHeadphoneBridgePin, HeadphoneJackEvents);
 
 //=============================================================================
 static
@@ -80,7 +81,7 @@ PCPIN_DESCRIPTOR HeadphoneTopoMiniportPins[] =
     0,
     0,
     0,                                                  // InstanceCount
-    &AutomationHeadphoneBridgePin,                      // AutomationTable (jack events)
+    NULL,                                               // AutomationTable (jack events are on the filter)
     {                                                   // KsPinDescriptor
       0,                                                // InterfacesCount
       NULL,                                             // Interfaces
@@ -198,7 +199,7 @@ PCPROPERTY_ITEM PropertiesHeadphoneTopoFilter[] =
     }
 };
 
-DEFINE_PCAUTOMATION_TABLE_PROP(AutomationHeadphoneTopoFilter, PropertiesHeadphoneTopoFilter);
+DEFINE_PCAUTOMATION_TABLE_PROP_EVENT(AutomationHeadphoneTopoFilter, PropertiesHeadphoneTopoFilter, HeadphoneJackEvents);
 
 //=============================================================================
 static
