@@ -6,6 +6,15 @@
 
 #define JACKMON_POOLTAG 'kcaJ'
 
+// ZwCreateEvent is exported by ntoskrnl but only declared in ntifs.h, which a
+// PortCls driver doesn't include.
+extern "C" NTSYSAPI NTSTATUS NTAPI ZwCreateEvent(
+    _Out_ PHANDLE EventHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ EVENT_TYPE EventType,
+    _In_ BOOLEAN InitialState);
+
 // {4D1E55B2-F16F-11CF-88CB-001111000030} GUID_DEVINTERFACE_HID
 static const GUID JackMonHidInterface =
     { 0x4d1e55b2, 0xf16f, 0x11cf, { 0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30 } };
