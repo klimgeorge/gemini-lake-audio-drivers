@@ -52,12 +52,56 @@ typedef struct _JACKMON_STATE {
 static JACKMON_STATE g_Jack;
 static volatile LONG g_HeadphoneConnected = 1;   // "connected" until told otherwise
 
+// Status log, written as REG_SZ "JackStatus" under the driver's service key
+// (HKLM\SYSTEM\CurrentControlSet\Services\SimpleAudioSample) so it can be
+// read without a debugger. PASSIVE_LEVEL only.
+extern UNICODE_STRING g_RegistryPath;
+#define JACKLOG_CHARS 2048
+static WCHAR g_JackLog[JACKLOG_CHARS];
+static FAST_MUTEX g_JackLogLock;
+static BOOLEAN g_JackLogInit;
+
+static VOID JackLog(_Printf_format_string_ PCWSTR Fmt, ...)
+{
+    if (!g_JackLogInit) {
+        return;
+    }
+    WCHAR line[256];
+    va_list args;
+    va_start(args, Fmt);
+    NTSTATUS st = RtlStringCchVPrintfW(line, ARRAYSIZE(line), Fmt, args);
+    va_end(args);
+    if (!NT_SUCCESS(st) && st != STATUS_BUFFER_OVERFLOW) {
+        return;
+    }
+    DbgPrintEx(DPFLTR_IHVAUDIO_ID, DPFLTR_ERROR_LEVEL, "sofaudio jack: %ws\n", line);
+
+    ExAcquireFastMutex(&g_JackLogLock);
+    size_t used = 0;
+    if (!NT_SUCCESS(RtlStringCchLengthW(g_JackLog, JACKLOG_CHARS, &used)) ||
+        used + wcslen(line) + 3 >= JACKLOG_CHARS) {
+        g_JackLog[0] = L'\0';      // full: start over
+    }
+    RtlStringCchCatW(g_JackLog, JACKLOG_CHARS, line);
+    RtlStringCchCatW(g_JackLog, JACKLOG_CHARS, L"\r\n");
+    if (g_RegistryPath.Buffer) {
+        size_t len = 0;
+        RtlStringCchLengthW(g_JackLog, JACKLOG_CHARS, &len);
+        RtlWriteRegistryValue(RTL_REGISTRY_ABSOLUTE, g_RegistryPath.Buffer, L"JackStatus",
+            REG_SZ, g_JackLog, (ULONG)((len + 1) * sizeof(WCHAR)));
+    }
+    ExReleaseFastMutex(&g_JackLogLock);
+}
+
 static VOID JackMonEnsureInit()
 {
     if (!g_Jack.Initialized) {
         ExInitializeFastMutex(&g_Jack.Lock);
         ExInitializeFastMutex(&g_Jack.TopoLock);
         KeInitializeEvent(&g_Jack.StopEvent, NotificationEvent, FALSE);
+        ExInitializeFastMutex(&g_JackLogLock);
+        g_JackLog[0] = L'\0';
+        g_JackLogInit = TRUE;
         g_Jack.Initialized = TRUE;
     }
 }
@@ -89,8 +133,8 @@ static VOID JackMonSetState(_In_ BOOLEAN Connected)
 {
     LONG newValue = Connected ? 1 : 0;
     LONG old = InterlockedExchange(&g_HeadphoneConnected, newValue);
-    DbgPrintEx(DPFLTR_IHVAUDIO_ID, DPFLTR_ERROR_LEVEL,
-        "sofaudio: headphone jack %s\n", Connected ? "plugged in" : "unplugged");
+    JackLog(L"Jack: %s%s", Connected ? L"plugged in" : L"unplugged",
+        (old == newValue) ? L" (no change)" : L"");
     if (old == newValue) {
         return;
     }
@@ -156,9 +200,8 @@ static VOID JackMonThread(_In_ PVOID Context)
     IO_STATUS_BLOCK iosb;
     st = ZwCreateFile(&file, GENERIC_READ | GENERIC_WRITE, &oa, &iosb, NULL,
         FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN, 0, NULL, 0);
+    JackLog(L"Open %wZ: 0x%08X", &g_Jack.Link, st);
     if (!NT_SUCCESS(st)) {
-        DbgPrintEx(DPFLTR_IHVAUDIO_ID, DPFLTR_ERROR_LEVEL,
-            "sofaudio: open DA7219 HID collection failed 0x%08X\n", st);
         file = NULL;
         goto out;
     }
@@ -192,7 +235,11 @@ static VOID JackMonThread(_In_ PVOID Context)
             if (st == STATUS_CANCELLED) {
                 goto out;
             }
+            if (st == STATUS_SUCCESS) {
+                st = g_Jack.WriteIosb.Status;
+            }
         }
+        JackLog(L"State request: 0x%08X", st);
     }
 
     for (;;) {
@@ -208,10 +255,11 @@ static VOID JackMonThread(_In_ PVOID Context)
             st = g_Jack.ReadIosb.Status;
         }
         if (!NT_SUCCESS(st)) {
-            DbgPrintEx(DPFLTR_IHVAUDIO_ID, DPFLTR_ERROR_LEVEL,
-                "sofaudio: DA7219 HID read ended 0x%08X\n", st);
+            JackLog(L"Read ended: 0x%08X", st);
             break;          // device removed or driver stopping
         }
+        JackLog(L"Report: %02X %02X %02X (%u bytes)", g_Jack.ReadBuf[0], g_Jack.ReadBuf[1],
+            g_Jack.ReadBuf[2], (ULONG)g_Jack.ReadIosb.Information);
         if (g_Jack.ReadBuf[0] == DA7219_REPORTID_SPECKEYS &&
             g_Jack.ReadBuf[1] == DA7219_CONTROL_CODE_JACK_TYPE) {
             JackMonSetState(g_Jack.ReadBuf[2] != 0);
@@ -300,14 +348,19 @@ static NTSTATUS JackMonPnpCallback(_In_ PVOID NotificationStructure, _Inout_opt_
     if (!IsEqualGUID(n->Event, JackMonInterfaceArrival) || !n->SymbolicLinkName) {
         return STATUS_SUCCESS;
     }
-    // DA7219 vendor collection: HID\VID_2DCF&PID_7219&Col02
-    if (!JackMonContains(n->SymbolicLinkName, L"VID_2DCF&PID_7219") ||
-        !JackMonContains(n->SymbolicLinkName, L"COL02")) {
+    // DA7219 vendor collection. CoolStar's signed driver enumerates as
+    // HID\DLGS7219&Col02; a self-built one may report HID\VID_2DCF&PID_7219&Col02.
+    BOOLEAN isDa7219 = JackMonContains(n->SymbolicLinkName, L"DLGS7219") ||
+                       JackMonContains(n->SymbolicLinkName, L"VID_2DCF&PID_7219");
+    if (!isDa7219) {
+        return STATUS_SUCCESS;
+    }
+    if (!JackMonContains(n->SymbolicLinkName, L"COL02")) {
+        JackLog(L"Skip %wZ", n->SymbolicLinkName);
         return STATUS_SUCCESS;
     }
     NTSTATUS st = JackMonStartReader(n->SymbolicLinkName);
-    DbgPrintEx(DPFLTR_IHVAUDIO_ID, DPFLTR_ERROR_LEVEL,
-        "sofaudio: DA7219 jack reports at %wZ: 0x%08X\n", n->SymbolicLinkName, st);
+    JackLog(L"DA7219 jack collection %wZ, reader: 0x%08X", n->SymbolicLinkName, st);
     return STATUS_SUCCESS;
 }
 
@@ -324,6 +377,10 @@ NTSTATUS JackMonStart(_In_ PDRIVER_OBJECT DriverObject)
     KeClearEvent(&g_Jack.StopEvent);
     ExReleaseFastMutex(&g_Jack.Lock);
 
+    ExAcquireFastMutex(&g_JackLogLock);
+    g_JackLog[0] = L'\0';
+    ExReleaseFastMutex(&g_JackLogLock);
+
     // Existing interfaces are reported right away (the codec driver
     // normally starts before us), later arrivals when they happen.
     NTSTATUS st = IoRegisterPlugPlayNotification(EventCategoryDeviceInterfaceChange,
@@ -332,9 +389,9 @@ NTSTATUS JackMonStart(_In_ PDRIVER_OBJECT DriverObject)
         &g_Jack.Notification);
     if (!NT_SUCCESS(st)) {
         g_Jack.Notification = NULL;
-        DbgPrintEx(DPFLTR_IHVAUDIO_ID, DPFLTR_ERROR_LEVEL,
-            "sofaudio: HID interface notification failed 0x%08X\n", st);
     }
+    JackLog(L"Jack monitor started (sofaudio 0.7.1), HID notification: 0x%08X, DA7219 %s",
+        st, g_Jack.Running ? L"found" : L"not found yet");
     return st;
 }
 
