@@ -74,7 +74,9 @@ jobs:
           if (-not $inf2cat) { throw 'Inf2Cat not found' }
           $out = Join-Path $PWD 'out'
 
-          # SOF firmware for Apollo Lake (Intel-signed, SOF v2.2), pinned by tag + hash
+          # SOF firmware for Apollo Lake (Intel-signed, SOF v2.2), pinned by tag + hash.
+          # Gemini Lake Chromebooks need the community-key build of the same firmware
+          # (sof-bin community/sof-glk.ri is a symlink to community/sof-apl.ri).
           $fwUrl = 'https://raw.githubusercontent.com/thesofproject/sof-bin/v2026.09.2/v2.2.x/sof-v2.2/intel-signed/sof-apl.ri'
           $fwSha = 'D63499833BB20352E63907E2409F8246DF278A15CF7C73A24AEEFAFF19FB1A43'
           New-Item -ItemType Directory -Force (Join-Path $out 'sofapl') | Out-Null
@@ -82,6 +84,12 @@ jobs:
           Invoke-WebRequest $fwUrl -OutFile $fw
           $got = (Get-FileHash $fw -Algorithm SHA256).Hash
           if ($got -ne $fwSha) { throw "Firmware hash mismatch: $got" }
+          $fwGlkUrl = 'https://raw.githubusercontent.com/thesofproject/sof-bin/v2026.09.2/v2.2.x/sof-v2.2/community/sof-apl.ri'
+          $fwGlkSha = '054C7ABEDF89B20ADF195FAA14CA31D8C964E360FB5D5F8D9EE8E4596227C330'
+          $fwGlk = Join-Path $out 'sofapl\community-sof-glk.ri'
+          Invoke-WebRequest $fwGlkUrl -OutFile $fwGlk
+          $got = (Get-FileHash $fwGlk -Algorithm SHA256).Hash
+          if ($got -ne $fwGlkSha) { throw "Community firmware hash mismatch: $got" }
           Invoke-WebRequest 'https://raw.githubusercontent.com/thesofproject/sof-bin/v2026.09.2/LICENCE.Intel' -OutFile (Join-Path $out 'sofapl\LICENCE.Intel.txt')
 
           # package folder -> binary/INF base name
