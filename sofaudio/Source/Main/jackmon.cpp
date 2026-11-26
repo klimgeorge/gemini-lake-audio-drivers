@@ -140,11 +140,14 @@ static VOID JackMonSetState(_In_ BOOLEAN Connected)
     }
     // Raise the event while holding TopoLock: the miniport destructor takes
     // the same lock, so the miniport can't be freed during the call.
+    BOOLEAN sent = FALSE;
     ExAcquireFastMutex(&g_Jack.TopoLock);
     if (g_Jack.HeadphoneTopo) {
         SofGenerateHeadphoneJackEvent(g_Jack.HeadphoneTopo);
+        sent = TRUE;
     }
     ExReleaseFastMutex(&g_Jack.TopoLock);
+    JackLog(L"  jack-change event %s", sent ? L"sent to Windows" : L"NOT sent (no headphone filter)");
 }
 
 // Case-insensitive "does Haystack contain Needle" for symbolic link names.
@@ -396,7 +399,7 @@ NTSTATUS JackMonStart(_In_ PDRIVER_OBJECT DriverObject)
     if (!NT_SUCCESS(st)) {
         g_Jack.Notification = NULL;
     }
-    JackLog(L"Jack monitor started (sofaudio 0.7.2), HID notification: 0x%08X", st);
+    JackLog(L"Jack monitor started (sofaudio 0.7.3), HID notification: 0x%08X", st);
     return st;
 }
 
